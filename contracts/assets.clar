@@ -147,3 +147,78 @@
   )
 )
 
+;; ========== User Operation Functions ==========
+
+;; Function to authorize a spender with expiration
+(define-public (authorize-spender (spender principal) (asset-id uint) (amount uint) (expiration-height (optional uint)))
+  (let
+    (
+      (owner tx-sender)
+      (current-height block-height)
+    )
+    (asserts! (is-eq (var-get contract-status) "active") ERR_CONTRACT_PAUSED)
+    (asserts! (is-valid-asset-id asset-id) ERR_ASSET_NOT_FOUND)
+    (asserts! (not (is-eq spender owner)) ERR_INVALID_SPENDER)
+    (asserts! (>= amount u0) ERR_INVALID_AMOUNT)
+    
+    ;; Set or update authorization
+    (map-set spending-authorizations
+      { asset-owner: owner, authorized-spender: spender, asset-id: asset-id }
+      { 
+        authorized-amount: amount,
+        expiration-height: expiration-height
+      }
+    )
+    (ok true)
+  )
+)
+
+;; Function to transfer tokens
+(define-public (transfer-asset (to principal) (asset-id uint) (amount uint))
+  (let
+    (
+      (sender tx-sender)
+    )
+    (asserts! (is-eq (var-get contract-status) "active") ERR_CONTRACT_PAUSED)
+    (asserts! (is-valid-asset-id asset-id) ERR_ASSET_NOT_FOUND)
+    (asserts! (not (is-eq to sender)) ERR_INVALID_RECIPIENT)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (execute-transfer sender to asset-id amount)
+  )
+)
+
+;; Function to transfer tokens on behalf of another user
+(define-public (transfer-from (from principal) (to principal) (asset-id uint) (amount uint))
+  (let
+    (
+      (sender tx-sender)
+      (authorization (get-authorization-details from sender asset-id))
+      (current-height block-height)
+    )
+    (asserts! (is-eq (var-get contract-status) "active") ERR_CONTRACT_PAUSED)
+    (asserts! (is-valid-asset-id asset-id) ERR_ASSET_NOT_FOUND)
+    (asserts! (not (is-eq to from)) ERR_INVALID_RECIPIENT)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    
+    ;; Check authorization
+    (asserts! (>= (get authorized-amount authorization) amount) ERR_UNAUTHORIZED)
+    
+    ;; Check expiration if set
+    (match (get expiration-height authorization)
+      expiry (asserts! (< current-height expiry) ERR_AUTHORIZATION_EXPIRED)
+      true
+    )
+    
+    ;; Update remaining authorization
+    (map-set spending-authorizations
+      { asset-owner: from, authorized-spender: sender, asset-id: asset-id }
+      { 
+        authorized-amount: (- (get authorized-amount authorization) amount),
+        expiration-height: (get expiration-height authorization)
+      }
+    )
+    
+    (execute-transfer from to asset-id amount)
+  )
+)
+
