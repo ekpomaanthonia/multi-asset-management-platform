@@ -60,6 +60,36 @@
 (define-constant ERR_INVALID_SPENDER (err u111))
 (define-constant ERR_CONTRACT_PAUSED (err u112))
 (define-constant ERR_AUTHORIZATION_EXPIRED (err u113))
+(define-constant ERR_INVALID_METADATA (err u114))
+(define-constant ERR_INVALID_ASSET_ID (err u115))
+(define-constant ERR_INVALID_EXPIRATION (err u116))
+
+;; ========== Validation Functions ==========
+
+;; Function to validate asset-id
+(define-read-only (is-valid-asset-id (asset-id uint))
+  (and 
+    (> asset-id u0)
+    (<= asset-id (var-get next-asset-id))
+    (is-some (map-get? registered-assets { id: asset-id }))
+  )
+)
+
+;; Function to validate metadata URI
+(define-read-only (is-valid-metadata-uri (uri (optional (string-utf8 256))))
+  (match uri
+    uri-string (> (len uri-string) u0)
+    true
+  )
+)
+
+;; Function to validate expiration height
+(define-read-only (is-valid-expiration (expiry (optional uint)))
+  (match expiry
+    height (> height block-height)
+    true
+  )
+)
 
 ;; ========== Administrative Functions ==========
 
@@ -94,6 +124,7 @@
     (
       (asset-id (+ (var-get next-asset-id) u1))
       (block-height block-height)
+      (validated-metadata metadata-uri)
     )
     ;; Authorization check
     (asserts! (is-eq tx-sender (var-get contract-admin)) ERR_ADMIN_ONLY)
@@ -105,6 +136,7 @@
     (asserts! (> (len category) u0) ERR_INVALID_CATEGORY)
     (asserts! (> total-supply u0) ERR_INVALID_SUPPLY)
     (asserts! (> initial-price u0) ERR_INVALID_PRICE)
+    (asserts! (is-valid-metadata-uri metadata-uri) ERR_INVALID_METADATA)
     
     ;; Register asset
     (map-set registered-assets
@@ -115,7 +147,7 @@
         total-supply: total-supply, 
         current-price: initial-price,
         created-at: block-height,
-        metadata-uri: metadata-uri
+        metadata-uri: validated-metadata
       }
     )
     
@@ -136,6 +168,7 @@
   (let ((asset-data (map-get? registered-assets { id: asset-id })))
     (asserts! (is-eq tx-sender (var-get contract-admin)) ERR_ADMIN_ONLY)
     (asserts! (is-eq (var-get contract-status) "active") ERR_CONTRACT_PAUSED)
+    (asserts! (is-valid-asset-id asset-id) ERR_INVALID_ASSET_ID)
     (asserts! (is-some asset-data) ERR_ASSET_NOT_FOUND)
     (asserts! (> new-price u0) ERR_INVALID_PRICE)
     
@@ -150,23 +183,29 @@
 ;; ========== User Operation Functions ==========
 
 ;; Function to authorize a spender with expiration
-(define-public (authorize-spender (spender principal) (asset-id uint) (amount uint) (expiration-height (optional uint)))
+(define-public (authorize-spender 
+    (spender principal) 
+    (asset-id uint) 
+    (amount uint) 
+    (expiration-height (optional uint)))
   (let
     (
       (owner tx-sender)
       (current-height block-height)
+      (validated-expiration expiration-height)
     )
     (asserts! (is-eq (var-get contract-status) "active") ERR_CONTRACT_PAUSED)
     (asserts! (is-valid-asset-id asset-id) ERR_ASSET_NOT_FOUND)
     (asserts! (not (is-eq spender owner)) ERR_INVALID_SPENDER)
     (asserts! (>= amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (is-valid-expiration expiration-height) ERR_INVALID_EXPIRATION)
     
     ;; Set or update authorization
     (map-set spending-authorizations
       { asset-owner: owner, authorized-spender: spender, asset-id: asset-id }
       { 
         authorized-amount: amount,
-        expiration-height: expiration-height
+        expiration-height: validated-expiration
       }
     )
     (ok true)
@@ -222,3 +261,70 @@
   )
 )
 
+;; ========== Helper Functions ==========
+
+;; Helper function to get authorization details
+(define-read-only (get-authorization-details (owner principal) (spender principal) (asset-id uint))
+  (default-to 
+    { authorized-amount: u0, expiration-height: none } 
+    (map-get? spending-authorizations { asset-owner: owner, authorized-spender: spender, asset-id: asset-id })
+  )
+)
+
+;; Helper function to perform asset transfer
+(define-private (execute-transfer (from principal) (to principal) (asset-id uint) (amount uint))
+  (let
+    (
+      (sender-data (default-to { balance: u0, last-updated: u0 } 
+                   (map-get? user-holdings { user: from, asset-id: asset-id })))
+      (receiver-data (default-to { balance: u0, last-updated: u0 } 
+                     (map-get? user-holdings { user: to, asset-id: asset-id })))
+      (current-height block-height)
+    )
+    (asserts! (>= (get balance sender-data) amount) ERR_INSUFFICIENT_BALANCE)
+    
+    ;; Update sender balance
+    (map-set user-holdings
+      { user: from, asset-id: asset-id }
+      { 
+        balance: (- (get balance sender-data) amount),
+        last-updated: current-height
+      }
+    )
+    
+    ;; Update receiver balance
+    (map-set user-holdings
+      { user: to, asset-id: asset-id }
+      { 
+        balance: (+ (get balance receiver-data) amount),
+        last-updated: current-height
+      }
+    )
+    (ok true)
+  )
+)
+
+;; ========== Read-Only Functions ==========
+
+;; Function to get asset details
+(define-read-only (get-asset-details (asset-id uint))
+  (map-get? registered-assets { id: asset-id })
+)
+
+;; Function to get user balance for an asset
+(define-read-only (get-user-holdings (user principal) (asset-id uint))
+  (default-to 
+    { balance: u0, last-updated: u0 } 
+    (map-get? user-holdings { user: user, asset-id: asset-id })
+  )
+)
+
+;; Function to get contract status
+(define-read-only (get-contract-status)
+  (var-get contract-status)
+)
+
+;; Function to get current administrator
+(define-read-only (get-contract-admin)
+  (var-get contract-admin)
+)
